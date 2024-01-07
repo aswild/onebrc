@@ -2,6 +2,10 @@ use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
+use rayon::prelude::*;
+
+type HashMap<K, V> = std::collections::HashMap<K, V>;
+
 #[derive(Debug, Clone, Copy)]
 struct Row<'a> {
     city: &'a str,
@@ -79,7 +83,6 @@ impl Stats {
         }
     }
 
-    #[allow(unused)]
     fn update_stats(&mut self, other: Stats) {
         self.total += other.total;
         self.count += other.count;
@@ -94,10 +97,11 @@ impl Stats {
 
 #[derive(Debug, Default)]
 struct ResultsMap {
-    map: std::collections::HashMap<String, Stats>,
+    map: HashMap<String, Stats>,
 }
 
 impl ResultsMap {
+    /// add a single row to these results
     fn ingest(&mut self, row: Row) {
         if let Some(stats) = self.map.get_mut(row.city) {
             stats.update_row(row.temp);
@@ -105,33 +109,53 @@ impl ResultsMap {
             self.map.insert(row.city.into(), Stats::new(row.temp));
         }
     }
+
+    /// combine with all of `other`'s results
+    fn merge(&mut self, other: ResultsMap) {
+        for (city, stats) in other {
+            if let Some(my_stats) = self.map.get_mut(&city) {
+                my_stats.update_stats(stats);
+            } else {
+                self.map.insert(city, stats);
+            }
+        }
+    }
+}
+
+impl IntoIterator for ResultsMap {
+    type Item = (String, Stats);
+    type IntoIter = <HashMap<String, Stats> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.map.into_iter()
+    }
 }
 
 fn main() {
     let measurements_path = std::env::args().nth(1).expect("missing filename argument");
-    let mut file =
-        BufReader::new(File::open(measurements_path).expect("failed to open input file"));
+    let file = BufReader::new(File::open(measurements_path).expect("failed to open input file"));
 
-    let mut line = String::new();
-    let mut results = ResultsMap::default();
+    let worker_results: Vec<ResultsMap> = file
+        .lines() // this allocs a new String on each iteration!
+        .map(|res| res.expect("failed to read line"))
+        .par_bridge()
+        .fold(ResultsMap::default, |mut results, mut line| {
+            if line.ends_with('\n') {
+                line.pop();
+            }
+            let row = Row::parse(&line);
+            results.ingest(row);
+            results
+        })
+        .collect();
 
-    loop {
-        line.clear();
-        match file.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => (),
-            Err(err) => panic!("failed to read line: {err}"),
-        }
-
-        if line.ends_with('\n') {
-            line.pop();
-        }
-        let row = Row::parse(&line);
-        results.ingest(row);
-    }
-
-    let mut final_results: Vec<(String, FinalStats)> = results
-        .map
+    let mut final_results: Vec<(String, FinalStats)> = worker_results
+        .into_iter()
+        .reduce(|mut acc, e| {
+            acc.merge(e);
+            acc
+        })
+        .expect("empty final ResultsMap")
         .into_iter()
         .map(|(city, stats)| (city, stats.finalize()))
         .collect();
