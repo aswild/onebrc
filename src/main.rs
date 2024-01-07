@@ -1,6 +1,7 @@
 use std::fmt;
 use std::fs::File;
 
+use bstr::{BStr, BString, ByteSlice};
 use memmap2::Mmap;
 use rayon::prelude::*;
 
@@ -8,22 +9,26 @@ type HashMap<K, V> = std::collections::HashMap<K, V>;
 
 #[derive(Debug, Clone, Copy)]
 struct Row<'a> {
-    city: &'a str,
+    city: &'a BStr,
     temp: f32,
 }
 
 impl<'a> Row<'a> {
-    fn parse(s: &'a str) -> Self {
+    fn parse(s: &'a BStr) -> Self {
         match Self::try_parse(s) {
             Ok(row) => row,
             Err(err) => panic!("Failed to parse row '{s}': {err}"),
         }
     }
 
-    fn try_parse(s: &'a str) -> Result<Self, &'static str> {
+    fn try_parse(s: &'a BStr) -> Result<Self, &'static str> {
+        let s = s.to_str().expect("line isn't utf-8"); // TODO
         let (city, s) = s.split_once(';').ok_or("missing ';' in line")?;
         let temp = s.parse::<f32>().map_err(|_| "failed to parse number")?;
-        Ok(Self { city, temp })
+        Ok(Self {
+            city: BStr::new(city),
+            temp,
+        })
     }
 }
 
@@ -97,7 +102,7 @@ impl Stats {
 
 #[derive(Debug, Default)]
 struct ResultsMap {
-    map: HashMap<String, Stats>,
+    map: HashMap<BString, Stats>,
 }
 
 impl ResultsMap {
@@ -123,8 +128,8 @@ impl ResultsMap {
 }
 
 impl IntoIterator for ResultsMap {
-    type Item = (String, Stats);
-    type IntoIter = <HashMap<String, Stats> as IntoIterator>::IntoIter;
+    type Item = (BString, Stats);
+    type IntoIter = <HashMap<BString, Stats> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         self.map.into_iter()
@@ -137,15 +142,17 @@ fn main() {
 
     // mmap the whole thing and cast to a string (do a huge utf-8 validation)
     let data = unsafe { Mmap::map(&file).expect("failed to mmap input file") };
-    let data_str = std::str::from_utf8(&data).expect("input file is not UTF-8");
+    let data_str = BStr::new(&data);
 
     let merged_results: ResultsMap = data_str
-        .par_lines()
+        .par_split(|b| *b == b'\n')
+        // skip empty lines, e.g. returned at the end of file
+        .filter(|line| !line.is_empty())
         // Fold lines into a collection of ResultsMaps (nominally one per worker thread). The
         // closure is given the accumulator by value, and returns the new accumulator. Continues
         // the ParallelIterator where Item = ResultsMap
         .fold(ResultsMap::default, |mut results, line| {
-            let row = Row::parse(line);
+            let row = Row::parse(line.as_bstr());
             results.ingest(row);
             results
         })
@@ -155,7 +162,7 @@ fn main() {
             acc
         });
 
-    let mut summary_results: Vec<(String, FinalStats)> = merged_results
+    let mut summary_results: Vec<(BString, FinalStats)> = merged_results
         .into_iter()
         .map(|(city, stats)| (city, stats.finalize()))
         .collect();
