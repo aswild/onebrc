@@ -1,7 +1,7 @@
 use std::fmt;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
 
+use memmap2::Mmap;
 use rayon::prelude::*;
 
 type HashMap<K, V> = std::collections::HashMap<K, V>;
@@ -133,36 +133,36 @@ impl IntoIterator for ResultsMap {
 
 fn main() {
     let measurements_path = std::env::args().nth(1).expect("missing filename argument");
-    let file = BufReader::new(File::open(measurements_path).expect("failed to open input file"));
+    let file = File::open(measurements_path).expect("failed to open input file");
 
-    let worker_results: Vec<ResultsMap> = file
-        .lines() // this allocs a new String on each iteration!
-        .map(|res| res.expect("failed to read line"))
-        .par_bridge()
-        .fold(ResultsMap::default, |mut results, mut line| {
-            if line.ends_with('\n') {
-                line.pop();
-            }
-            let row = Row::parse(&line);
+    // mmap the whole thing and cast to a string (do a huge utf-8 validation)
+    let data = unsafe { Mmap::map(&file).expect("failed to mmap input file") };
+    let data_str = std::str::from_utf8(&data).expect("input file is not UTF-8");
+
+    let merged_results: ResultsMap = data_str
+        .par_lines()
+        // Fold lines into a collection of ResultsMaps (nominally one per worker thread). The
+        // closure is given the accumulator by value, and returns the new accumulator. Continues
+        // the ParallelIterator where Item = ResultsMap
+        .fold(ResultsMap::default, |mut results, line| {
+            let row = Row::parse(line);
             results.ingest(row);
             results
         })
-        .collect();
-
-    let mut final_results: Vec<(String, FinalStats)> = worker_results
-        .into_iter()
-        .reduce(|mut acc, e| {
+        // reduce all of the ResultsMaps together into one
+        .reduce(ResultsMap::default, |mut acc, e| {
             acc.merge(e);
             acc
-        })
-        .expect("empty final ResultsMap")
+        });
+
+    let mut summary_results: Vec<(String, FinalStats)> = merged_results
         .into_iter()
         .map(|(city, stats)| (city, stats.finalize()))
         .collect();
-    final_results.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    summary_results.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
     print!("{{");
-    for (i, (city, stats)) in final_results.into_iter().enumerate() {
+    for (i, (city, stats)) in summary_results.into_iter().enumerate() {
         let comma = if i == 0 { "" } else { ", " };
         print!("{comma}{city}={stats}");
     }
