@@ -19,3 +19,4 @@ rand_distr = "0.4.3"
 [profile.release]
 codegen-units = 1
 lto = "fat"
+debug = true
