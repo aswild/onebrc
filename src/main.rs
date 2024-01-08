@@ -8,7 +8,7 @@ use rayon::prelude::*;
 mod temperature;
 use temperature::Temperature;
 
-type HashMap<K, V> = std::collections::HashMap<K, V>;
+type HashMap<K, V> = ahash::AHashMap<K, V>;
 
 #[derive(Debug, Clone, Copy)]
 struct Row<'a> {
