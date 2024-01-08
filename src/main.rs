@@ -5,12 +5,15 @@ use bstr::{BStr, BString, ByteSlice};
 use memmap2::Mmap;
 use rayon::prelude::*;
 
+mod temperature;
+use temperature::Temperature;
+
 type HashMap<K, V> = std::collections::HashMap<K, V>;
 
 #[derive(Debug, Clone, Copy)]
 struct Row<'a> {
     city: &'a BStr,
-    temp: f32,
+    temp: Temperature,
 }
 
 impl<'a> Row<'a> {
@@ -24,7 +27,7 @@ impl<'a> Row<'a> {
     fn try_parse(s: &'a BStr) -> Result<Self, &'static str> {
         let s = s.to_str().expect("line isn't utf-8"); // TODO
         let (city, s) = s.split_once(';').ok_or("missing ';' in line")?;
-        let temp = s.parse::<f32>().map_err(|_| "failed to parse number")?;
+        let temp = Temperature::parse(s).map_err(|_| "failed to parse number")?;
         Ok(Self {
             city: BStr::new(city),
             temp,
@@ -34,27 +37,27 @@ impl<'a> Row<'a> {
 
 #[derive(Debug, Clone, Copy)]
 struct Stats {
-    total: f32,
+    total: Temperature,
     count: u32,
-    min: f32,
-    max: f32,
+    min: Temperature,
+    max: Temperature,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct FinalStats {
-    mean: f32,
-    min: f32,
-    max: f32,
+    mean: Temperature,
+    min: Temperature,
+    max: Temperature,
 }
 
 impl fmt::Display for FinalStats {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:.1}/{:.1}/{:.1}", self.min, self.mean, self.max)
+        write!(f, "{}/{}/{}", self.min, self.mean, self.max)
     }
 }
 
 impl Stats {
-    fn new(temp: f32) -> Self {
+    fn new(temp: Temperature) -> Self {
         Self {
             total: temp,
             count: 1,
@@ -64,20 +67,14 @@ impl Stats {
     }
 
     fn finalize(self) -> FinalStats {
-        let mean = self.total / (self.count as f32);
-        // round to one decimal place, which we have to do as an actual round operation rather than
-        // as part of output formatting, otherwise some 1.X5 values round down instead of up which
-        // doesn't match the correct output.
-        let mean = (mean * 10.0).round() / 10.0;
-
         FinalStats {
-            mean,
+            mean: self.total / self.count,
             min: self.min,
             max: self.max,
         }
     }
 
-    fn update_row(&mut self, temp: f32) {
+    fn update_row(&mut self, temp: Temperature) {
         self.total += temp;
         self.count += 1;
         if temp < self.min {
