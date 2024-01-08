@@ -25,9 +25,16 @@ impl<'a> Row<'a> {
     }
 
     fn try_parse(s: &'a BStr) -> Result<Self, &'static str> {
-        let s = s.to_str().expect("line isn't utf-8"); // TODO
-        let (city, s) = s.split_once(';').ok_or("missing ';' in line")?;
-        let temp = Temperature::parse(s).map_err(|_| "failed to parse number")?;
+        // apparently we don't have split_once stable for slices yet, and the input lines aren't
+        // big enough to drag in memchr, so just roll my own. Interestingly, using iterators and
+        // position are the most "idiomatic" ways to implement "find index of first matching
+        // element" in a slice. I can't believe there's not a slice::find method or similar.
+        let (city, temp_s) = {
+            let index = s.iter().position(|&b| b == b';').ok_or("missing ';'")?;
+            (&s[..index], &s[(index + 1)..])
+        };
+
+        let temp = Temperature::parse(temp_s).map_err(|_| "failed to parse number")?;
         Ok(Self {
             city: BStr::new(city),
             temp,
