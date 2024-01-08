@@ -8,6 +8,10 @@ use rayon::prelude::*;
 mod temperature;
 use temperature::Temperature;
 
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 type HashMap<K, V> = ahash::AHashMap<K, V>;
 
 #[derive(Debug, Clone, Copy)]

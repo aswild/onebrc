@@ -11,6 +11,9 @@ bstr = "1.9.0"
 memmap2 = "0.9.3"
 rayon = "1.8.0"
 
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.5"
+
 [dev-dependencies]
 num_cpus = "1.16.0"
 rand = { version = "0.8.5", features = ["small_rng"] }
