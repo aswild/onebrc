@@ -16,26 +16,17 @@ struct Row<'a> {
 }
 
 impl<'a> Row<'a> {
-    fn parse(s: &'a BStr) -> Self {
-        match Self::try_parse(s) {
-            Ok(row) => row,
-            Err(err) => panic!("Failed to parse row '{s}': {err}"),
-        }
-    }
-
     /// Parse a single row. SPICY HOT!
-    fn try_parse(s: &'a BStr) -> Result<Self, &'static str> {
-        // apparently we don't have split_once stable for slices yet, and the input lines aren't
-        // big enough to drag in memchr, so just roll my own. Interestingly, using iterators and
-        // position are the most "idiomatic" ways to implement "find index of first matching
-        // element" in a slice. I can't believe there's not a slice::find method or similar.
-        let (city, temp_s) = {
-            let index = s.iter().position(|&b| b == b';').ok_or("missing ';'")?;
-            (&s[..index], &s[(index + 1)..])
-        };
-
-        let temp = Temperature::parse(temp_s).map_err(|_| "failed to parse number")?;
-        Ok(Self {
+    fn parse(s: &'a BStr) -> Option<Self> {
+        // split at the location of the ';'. This means the first character of what we send to
+        // Temperature::parse is ';' but that's fine, it'll be ignored there (and saves us
+        // extra bounds checks manually slicing that away here).
+        // And since lines are short (only a few dozen bytes) it's faster to use a basic naive
+        // linear byte-by-byte search that s.iter().position() compiles down to rather than
+        // something like memchr.
+        let (city, temp_s) = s.split_at(s.iter().position(|b| *b == b';')?);
+        let temp = Temperature::parse(temp_s);
+        Some(Self {
             city: BStr::new(city),
             temp,
         })
@@ -184,8 +175,7 @@ fn process_data(data: &[u8]) -> ResultsMap {
         // in a worker thread. fold() returns a ParallelIterator<Item = ResultsMap>.
         .fold(ResultsMap::default, |mut results, line| {
             // SPICY HOT! Called for every line.
-            if !line.is_empty() {
-                let row = Row::parse(line.as_bstr());
+            if let Some(row) = Row::parse(line.as_bstr()) {
                 results.ingest(row);
             }
             // pass on results accumulator for next task
@@ -204,8 +194,7 @@ fn process_data(data: &[u8]) -> ResultsMap {
     data.split(|&b| b == b'\n')
         .fold(ResultsMap::default(), |mut results, line| {
             // SPICY HOT! Called for every line.
-            if !line.is_empty() {
-                let row = Row::parse(line.as_bstr());
+            if let Some(row) = Row::parse(line.as_bstr()) {
                 results.ingest(row);
             }
             // pass on results accumulator for next task
