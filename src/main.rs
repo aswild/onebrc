@@ -3,7 +3,6 @@ use std::fs::File;
 
 use bstr::{BStr, BString, ByteSlice};
 use memmap2::Mmap;
-use rayon::prelude::*;
 
 mod temperature;
 use temperature::Temperature;
@@ -173,8 +172,11 @@ impl IntoIterator for ResultsMap {
 /// This is the meat of the work, the vast majority of program runtime is spent in this function.
 /// It's not inlined for better visibility in perf tools, even though it's only called once from
 /// main().
+#[cfg(feature = "rayon")]
 #[inline(never)]
 fn process_data(data: &[u8]) -> ResultsMap {
+    use rayon::prelude::*;
+
     // split on lines in parallel
     data.par_split(|b| *b == b'\n')
         // Rayon will make a bunch of ResultsMaps (the exact amount isn't specified beyond "as
@@ -193,6 +195,22 @@ fn process_data(data: &[u8]) -> ResultsMap {
         // Somehow this (which uses the std::iter::Sum impl above) is faster than using
         // ParallelIterator::reduce, even though it's basically the same code.
         .sum()
+}
+
+/// Single-threaded version of the above
+#[cfg(not(feature = "rayon"))]
+#[inline(never)]
+fn process_data(data: &[u8]) -> ResultsMap {
+    data.split(|&b| b == b'\n')
+        .fold(ResultsMap::default(), |mut results, line| {
+            // SPICY HOT! Called for every line.
+            if !line.is_empty() {
+                let row = Row::parse(line.as_bstr());
+                results.ingest(row);
+            }
+            // pass on results accumulator for next task
+            results
+        })
 }
 
 fn main() {
