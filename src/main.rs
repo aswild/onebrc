@@ -121,6 +121,13 @@ impl ResultsMap {
 
     /// combine with all of `other`'s results
     fn merge(&mut self, other: ResultsMap) {
+        // special case if we're merging into an empty map, we can just assume the other map
+        // in-place
+        if self.map.is_empty() {
+            *self = other;
+            return;
+        }
+
         for (city, stats) in other {
             if let Some(my_stats) = self.map.get_mut(&city) {
                 my_stats.update_stats(stats);
@@ -128,6 +135,25 @@ impl ResultsMap {
                 self.map.insert(city, stats);
             }
         }
+    }
+}
+
+impl std::ops::Add for ResultsMap {
+    type Output = Self;
+
+    fn add(mut self, rhs: Self) -> Self::Output {
+        self.merge(rhs);
+        self
+    }
+}
+
+impl std::iter::Sum for ResultsMap {
+    fn sum<I: Iterator<Item = Self>>(mut iter: I) -> Self {
+        let first = match iter.next() {
+            Some(x) => x,
+            None => return Self::default(),
+        };
+        iter.fold(first, std::ops::Add::add)
     }
 }
 
@@ -144,34 +170,43 @@ fn main() {
     let measurements_path = std::env::args().nth(1).expect("missing filename argument");
     let file = File::open(measurements_path).expect("failed to open input file");
 
-    // mmap the whole thing and cast to a string (do a huge utf-8 validation)
+    // mmap the whole thing, accessible as a bug &[u8]. No UTF-8 check
     let data = unsafe { Mmap::map(&file).expect("failed to mmap input file") };
-    let data_str = BStr::new(&data);
 
-    let merged_results: ResultsMap = data_str
+    // HOT CODE: this is the main computation loop. Rayon will make a bunch of ResultsMaps
+    // (I think when dispatching jobs on new workers, but the exact logic isn't specified beyond
+    // "as needed". On a computer with a lot of cores, this can go up to a few tens of thousands of
+    // intermediate maps).
+    let merged_results: ResultsMap = data
         .par_split(|b| *b == b'\n')
-        // skip empty lines, e.g. returned at the end of file
-        .filter(|line| !line.is_empty())
-        // Fold lines into a collection of ResultsMaps (nominally one per worker thread). The
-        // closure is given the accumulator by value, and returns the new accumulator. Continues
-        // the ParallelIterator where Item = ResultsMap
         .fold(ResultsMap::default, |mut results, line| {
-            let row = Row::parse(line.as_bstr());
-            results.ingest(row);
+            // Main worker task. Check for empty lines, such as encountered at EOF
+            if !line.is_empty() {
+                let row = Row::parse(line.as_bstr());
+                results.ingest(row);
+            }
+            // pass on results accumulator for next task
             results
         })
-        // reduce all of the ResultsMaps together into one
-        .reduce(ResultsMap::default, |mut acc, e| {
-            acc.merge(e);
-            acc
-        });
+        // Then immediately (and still in parallel) reduce those ResultsMaps into a single one.
+        // Somehow this, combined with the std::iter::Sum impl above, is faster than using
+        // ParallelIterator::reduce here, even though it's basically the same code.
+        .sum();
+    //.reduce(ResultsMap::default, |mut acc, e| {
+    //    acc.merge(e);
+    //    acc
+    //});
 
+    // Finalize statstics: determine the mean temperatures and sort by city name. It's faster to do
+    // this serially, since rayon's parallel iteration over maps is to first collect them into an
+    // intermediate Vec, and the computation in stats.finalize is cheap (like 3 f64 ops).
     let mut summary_results: Vec<(BString, FinalStats)> = merged_results
         .into_iter()
         .map(|(city, stats)| (city, stats.finalize()))
         .collect();
     summary_results.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
+    // Print results
     print!("{{");
     for (i, (city, stats)) in summary_results.into_iter().enumerate() {
         let comma = if i == 0 { "" } else { ", " };
