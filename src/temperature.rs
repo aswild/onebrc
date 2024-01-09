@@ -23,7 +23,7 @@ impl fmt::Display for Temperature {
 }
 
 impl Temperature {
-    /// Parse an ASCII string of the form `-?[0-9]+\.[0-9]`
+    /// Parse an ASCII string of the form `-?[0-9]+\.[0-9]`. SPICY HOT!
     pub fn parse(s: impl AsRef<[u8]>) -> Result<Self, &'static str> {
         #[derive(Clone, Copy, PartialEq)]
         enum State {

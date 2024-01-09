@@ -24,6 +24,7 @@ impl<'a> Row<'a> {
         }
     }
 
+    /// Parse a single row. SPICY HOT!
     fn try_parse(s: &'a BStr) -> Result<Self, &'static str> {
         // apparently we don't have split_once stable for slices yet, and the input lines aren't
         // big enough to drag in memchr, so just roll my own. Interestingly, using iterators and
@@ -166,21 +167,21 @@ impl IntoIterator for ResultsMap {
     }
 }
 
-fn main() {
-    let measurements_path = std::env::args().nth(1).expect("missing filename argument");
-    let file = File::open(measurements_path).expect("failed to open input file");
-
-    // mmap the whole thing, accessible as a bug &[u8]. No UTF-8 check
-    let data = unsafe { Mmap::map(&file).expect("failed to mmap input file") };
-
-    // HOT CODE: this is the main computation loop. Rayon will make a bunch of ResultsMaps
-    // (I think when dispatching jobs on new workers, but the exact logic isn't specified beyond
-    // "as needed". On a computer with a lot of cores, this can go up to a few tens of thousands of
-    // intermediate maps).
-    let merged_results: ResultsMap = data
-        .par_split(|b| *b == b'\n')
+/// Given a buffer containing input file contents (possibly mmap'd), collect all of the
+/// measurement results together.
+///
+/// This is the meat of the work, the vast majority of program runtime is spent in this function.
+/// It's not inlined for better visibility in perf tools, even though it's only called once from
+/// main().
+#[inline(never)]
+fn process_data(data: &[u8]) -> ResultsMap {
+    // split on lines in parallel
+    data.par_split(|b| *b == b'\n')
+        // Rayon will make a bunch of ResultsMaps (the exact amount isn't specified beyond "as
+        // needed" but I've seen it surpass 25,000) and reuse them whenever it calls this closure
+        // in a worker thread. fold() returns a ParallelIterator<Item = ResultsMap>.
         .fold(ResultsMap::default, |mut results, line| {
-            // Main worker task. Check for empty lines, such as encountered at EOF
+            // SPICY HOT! Called for every line.
             if !line.is_empty() {
                 let row = Row::parse(line.as_bstr());
                 results.ingest(row);
@@ -189,13 +190,20 @@ fn main() {
             results
         })
         // Then immediately (and still in parallel) reduce those ResultsMaps into a single one.
-        // Somehow this, combined with the std::iter::Sum impl above, is faster than using
-        // ParallelIterator::reduce here, even though it's basically the same code.
-        .sum();
-    //.reduce(ResultsMap::default, |mut acc, e| {
-    //    acc.merge(e);
-    //    acc
-    //});
+        // Somehow this (which uses the std::iter::Sum impl above) is faster than using
+        // ParallelIterator::reduce, even though it's basically the same code.
+        .sum()
+}
+
+fn main() {
+    let measurements_path = std::env::args().nth(1).expect("missing filename argument");
+    let file = File::open(measurements_path).expect("failed to open input file");
+
+    // mmap the whole thing, accessible as a bug &[u8]. No UTF-8 check
+    let data = unsafe { Mmap::map(&file).expect("failed to mmap input file") };
+
+    // do all the main work
+    let merged_results = process_data(&data);
 
     // Finalize statstics: determine the mean temperatures and sort by city name. It's faster to do
     // this serially, since rayon's parallel iteration over maps is to first collect them into an
